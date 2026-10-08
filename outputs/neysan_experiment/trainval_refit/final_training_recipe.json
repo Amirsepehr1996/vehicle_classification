@@ -1,0 +1,53 @@
+{
+  "architecture": "resnet18",
+  "initialization": "selected_checkpoint",
+  "trainable_layers": [
+    "layer3",
+    "layer4",
+    "fc"
+  ],
+  "dropout": 0.25,
+  "loss": "bce",
+  "sampling": "balanced",
+  "batch_size": 16,
+  "epochs": 10,
+  "layer3_lr": 9.375e-08,
+  "layer4_lr": 3.125e-07,
+  "fc_lr": 3.125e-05,
+  "weight_decay": 0.0001,
+  "scheduler": "none_fixed_learning_rates",
+  "scheduler_monitor": null,
+  "batchnorm_running_stats": "fixed",
+  "seed": 42,
+  "image_size": 224,
+  "mean": [
+    0.485,
+    0.456,
+    0.406
+  ],
+  "std": [
+    0.229,
+    0.224,
+    0.225
+  ],
+  "padding_color": [
+    124,
+    116,
+    104
+  ],
+  "horizontal_flip_probability": 0.5,
+  "color_jitter": {
+    "brightness": 0.1,
+    "contrast": 0.1,
+    "saturation": 0.1
+  },
+  "training_images": 3269,
+  "validation_images": 0,
+  "checkpoint_rule": "save_after_final_epoch",
+  "human_check_threshold": 0.8,
+  "confidence_method": "uncalibrated_sigmoid_score",
+  "starting_checkpoint": "resnet18_neysan_best.pt",
+  "starting_checkpoint_epoch": 26,
+  "stage": "train_validation_refit",
+  "optimizer_state": "fresh"
+}

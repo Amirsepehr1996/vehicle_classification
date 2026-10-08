@@ -1,0 +1,12 @@
+{
+  "checkpoint": "resnet18_trainval_final.pt",
+  "checkpoint_sha256": "5ffdf4e8fec7ec8a9ec624a3b0f6e0d5000704d9823659abf9d28ae751df7337",
+  "test_images": 527,
+  "correct_predictions": 514,
+  "errors": 13,
+  "accuracy": 0.9753320683111955,
+  "macro_precision": 0.9745833121211758,
+  "macro_recall": 0.9754688567626857,
+  "macro_f1": 0.9746013001096532,
+  "confidence_method": "predicted_class_sigmoid_score"
+}

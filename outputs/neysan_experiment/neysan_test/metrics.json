@@ -1,0 +1,14 @@
+{
+  "checkpoint": "resnet18_neysan_trainval_final.pt",
+  "test_images": 243,
+  "correct": 228,
+  "errors": 15,
+  "neysan_as_vanet_accuracy": 0.9382716049382716,
+  "vanet_recall_on_neysan": 0.9382716049382716,
+  "vanet_precision_on_neysan_only": 1.0,
+  "vanet_f1_on_neysan_only": 0.9681528662420382,
+  "confidence_method": "uncalibrated_sigmoid_score",
+  "human_check_threshold": 0.8,
+  "below_threshold_images": 39,
+  "evaluation_scope": "Neysan-only test; expected class is vanet. All images included regardless of confidence."
+}

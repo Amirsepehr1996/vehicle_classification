@@ -1,0 +1,52 @@
+{
+  "architecture": "resnet18",
+  "initialization": "train_validation_checkpoint",
+  "starting_checkpoint": "resnet18_trainval_final.pt",
+  "trainable_layers": [
+    "layer3",
+    "layer4",
+    "fc"
+  ],
+  "dropout": 0.25,
+  "loss": "bce",
+  "sampling": "balanced",
+  "batch_size": 16,
+  "epochs": 8,
+  "optimizer": "AdamW",
+  "optimizer_state": "fresh",
+  "layer3_lr": 1.5e-06,
+  "layer4_lr": 5e-06,
+  "fc_lr": 1.5e-05,
+  "weight_decay": 0.0001,
+  "scheduler": "none_fixed_learning_rates",
+  "batchnorm_running_stats": "fixed",
+  "seed": 42,
+  "image_size": 224,
+  "mean": [
+    0.485,
+    0.456,
+    0.406
+  ],
+  "std": [
+    0.229,
+    0.224,
+    0.225
+  ],
+  "padding_color": [
+    124,
+    116,
+    104
+  ],
+  "resize": "preserve_aspect_ratio_with_padding",
+  "horizontal_flip_probability": 0.5,
+  "color_jitter": {
+    "brightness": 0.1,
+    "contrast": 0.1,
+    "saturation": 0.1
+  },
+  "training_images": 3512,
+  "checkpoint_rule": "save_after_final_epoch",
+  "stage": "all_data_refit",
+  "local_held_out_evaluation": false,
+  "training_manifest_sha256": "40f0e31e002ec67cda29c704646dc6b475235dec60ba3856bf0a7f9c48cee28d"
+}
