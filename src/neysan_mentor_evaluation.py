@@ -11,7 +11,6 @@ from sklearn.metrics import (
     accuracy_score,
     classification_report,
     confusion_matrix,
-    precision_recall_fscore_support,
 )
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
@@ -61,22 +60,8 @@ def load_model(checkpoint_path, device):
     if config["architecture"] != "resnet18":
         raise ValueError("Expected a ResNet18 checkpoint.")
 
-    if config["loss"].lower() != "bce":
-        raise ValueError("Expected the selected BCE model.")
-
-    if checkpoint.get("stage") != "neysan_train_validation_refit":
-        raise ValueError(
-            "Use resnet18_neysan_trainval_final.pt "
-            "from the Neysan experiment."
-        )
-
     if sorted(class_to_idx.values()) != list(range(len(class_to_idx))):
         raise ValueError("Invalid class mapping.")
-
-    if "vanet" not in class_to_idx or "neysan" in class_to_idx:
-        raise ValueError(
-            "The model must predict Vanet, with no separate Neysan class."
-        )
 
     classes = sorted(class_to_idx, key=class_to_idx.get)
 
@@ -107,8 +92,7 @@ def calculate_sha256(path):
     return digest.hexdigest()
 
 
-def read_neysan_images(data_dir):
-    """The supplied folder must contain only Neysan test images."""
+def read_test_images(data_dir, class_to_idx):
     data_dir = Path(data_dir)
 
     if not data_dir.is_dir():
@@ -130,11 +114,30 @@ def read_neysan_images(data_dir):
         except Exception as exc:
             raise ValueError(f"Unreadable image: {path}: {exc}") from exc
 
+        relative = path.relative_to(data_dir)
+        lookup = {name.lower(): name for name in class_to_idx}
+        aliases = {"neysan": "vanet", "nysan": "vanet", "nissan": "vanet"}
+        source_label = None
+        expected_class = None
+        for part in reversed(relative.parts[:-1]):
+            label = part.lower()
+            mapped = label if label in lookup else aliases.get(label, label)
+            if mapped in lookup:
+                source_label = part
+                expected_class = lookup[mapped]
+                break
+        if expected_class is None:
+            label = data_dir.name.lower()
+            mapped = label if label in lookup else aliases.get(label, label)
+            if mapped in lookup:
+                source_label = data_dir.name
+                expected_class = lookup[mapped]
+
         rows.append({
             "path": str(path.resolve()),
             "relative_path": str(path.relative_to(data_dir)),
-            "source_label": "neysan",
-            "expected_class": "vanet",
+            "source_label": source_label,
+            "expected_class": expected_class,
             "sha256": calculate_sha256(path),
         })
 
@@ -147,8 +150,11 @@ def read_neysan_images(data_dir):
 def exclude_training_overlap(test_df, checkpoint, output_dir):
     training_hashes = checkpoint.get("training_sha256")
 
-    if not training_hashes:
-        raise ValueError("Training hashes are missing from the checkpoint.")
+    overlap_available = training_hashes is not None
+    if isinstance(training_hashes, torch.Tensor):
+        training_hashes = training_hashes.tolist()
+    if training_hashes is None:
+        training_hashes = []
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -167,7 +173,7 @@ def exclude_training_overlap(test_df, checkpoint, output_dir):
         "extra_duplicate_copies_in_evaluation": int(
             len(evaluation_df) - evaluation_df["sha256"].nunique()
         ),
-        "overlap_check_method": "exact_file_sha256",
+        "overlap_check_method": "exact_file_sha256" if overlap_available else "unavailable",
     }
 
     with (output_dir / "overlap_summary.json").open("w", encoding="utf-8") as file:
@@ -183,7 +189,7 @@ def exclude_training_overlap(test_df, checkpoint, output_dir):
     return evaluation_df, summary
 
 
-class NeysanTestDataset(Dataset):
+class VehicleTestDataset(Dataset):
     def __init__(self, dataframe, transform):
         self.dataframe = dataframe.reset_index(drop=True)
         self.transform = transform
@@ -199,9 +205,9 @@ class NeysanTestDataset(Dataset):
             return self.transform(image)
 
 
-def predict_images(model, transform, evaluation_df, classes, device, batch_size=16):
+def predict_images(model, transform, evaluation_df, classes, device, batch_size=16, loss="bce"):
     loader = DataLoader(
-        NeysanTestDataset(evaluation_df, transform),
+        VehicleTestDataset(evaluation_df, transform),
         batch_size=batch_size,
         shuffle=False,
         num_workers=0,
@@ -219,7 +225,7 @@ def predict_images(model, transform, evaluation_df, classes, device, batch_size=
                 raise RuntimeError("Model produced non-finite scores.")
 
             predictions = logits.argmax(dim=1)
-            scores = torch.sigmoid(logits)
+            scores = torch.sigmoid(logits) if loss.lower() in {"bce", "bcewithlogitsloss", "bcewithlogits"} else torch.softmax(logits, dim=1)
             confidence = scores.gather(1, predictions.unsqueeze(1)).squeeze(1)
 
             predicted_indices.extend(predictions.cpu().tolist())
@@ -234,11 +240,11 @@ def predict_images(model, transform, evaluation_df, classes, device, batch_size=
     results["predicted_class"] = [classes[i] for i in predicted_indices]
     results["confidence"] = confidence_scores
     results["confidence_percent"] = results["confidence"] * 100
-    results["correct"] = results["predicted_class"] == results["expected_class"]
+    results["correct"] = results.apply(lambda row: row["predicted_class"] == row["expected_class"] if pd.notna(row["expected_class"]) else None, axis=1)
     results["needs_human_check"] = results["confidence"] < CONFIDENCE_THRESHOLD
 
     for index, name in enumerate(classes):
-        results[f"sigmoid_score_{name}"] = [s[index] for s in all_scores]
+        results[f"score_{name}"] = [s[index] for s in all_scores]
 
     return results
 
@@ -254,68 +260,44 @@ def save_evaluation(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    true_labels = [class_to_idx[name] for name in results["expected_class"]]
-    predicted_labels = [class_to_idx[name] for name in results["predicted_class"]]
-    all_labels = list(range(len(classes)))
-
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        true_labels,
-        predicted_labels,
-        labels=[class_to_idx["vanet"]],
-        average=None,
-        zero_division=0,
-    )
-
-    review_mask = results["confidence"] < CONFIDENCE_THRESHOLD
-    correct_mask = results["correct"]
-
+    labeled = results.loc[results["expected_class"].notna()].copy()
+    review_mask = results["needs_human_check"]
     metrics = {
         **overlap_summary,
         "checkpoint": Path(checkpoint_path).name,
         "checkpoint_sha256": calculate_sha256(checkpoint_path),
-        "correct": int(correct_mask.sum()),
-        "errors": int((~correct_mask).sum()),
-        "neysan_as_vanet_accuracy": float(
-            accuracy_score(true_labels, predicted_labels)
-        ),
-        "vanet_recall_on_neysan": float(recall[0]),
-        "vanet_precision_on_neysan_only": float(precision[0]),
-        "vanet_f1_on_neysan_only": float(f1[0]),
-        "confidence_method": "uncalibrated_sigmoid_score",
+        "classes": classes,
+        "labeled_images": int(len(labeled)),
+        "unlabeled_images": int(len(results) - len(labeled)),
         "human_check_threshold": CONFIDENCE_THRESHOLD,
         "below_threshold_images": int(review_mask.sum()),
-        "errors_below_threshold": int((review_mask & ~correct_mask).sum()),
-        "errors_at_or_above_threshold": int((~review_mask & ~correct_mask).sum()),
-        "evaluation_scope": (
-            "Neysan-only test with expected class vanet. "
-            "All eligible images included regardless of confidence."
-        ),
+        "accuracy": None,
     }
-
-    report = classification_report(
-        true_labels,
-        predicted_labels,
-        labels=all_labels,
-        target_names=classes,
-        output_dict=True,
-        zero_division=0,
-    )
-    matrix = confusion_matrix(true_labels, predicted_labels, labels=all_labels)
-
     results.to_csv(output_dir / "predictions.csv", index=False)
-    results.loc[~correct_mask].to_csv(output_dir / "errors.csv", index=False)
-    pd.DataFrame(report).T.to_csv(output_dir / "classification_report.csv")
-    pd.DataFrame(matrix, index=classes, columns=classes).to_csv(
-        output_dir / "confusion_matrix.csv",
-        index_label="expected_class",
-    )
-
+    errors = labeled.loc[~labeled["correct"].astype(bool)]
+    errors.to_csv(output_dir / "errors.csv", index=False)
+    if not labeled.empty:
+        true_labels = [class_to_idx[name] for name in labeled["expected_class"]]
+        predicted_labels = [class_to_idx[name] for name in labeled["predicted_class"]]
+        all_labels = list(range(len(classes)))
+        metrics["accuracy"] = float(accuracy_score(true_labels, predicted_labels))
+        metrics["correct"] = int(labeled["correct"].sum())
+        metrics["errors"] = int(len(errors))
+        report = classification_report(
+            true_labels, predicted_labels, labels=all_labels,
+            target_names=classes, output_dict=True, zero_division=0,
+        )
+        matrix = confusion_matrix(true_labels, predicted_labels, labels=all_labels)
+        pd.DataFrame(report).T.to_csv(output_dir / "classification_report.csv")
+        pd.DataFrame(matrix, index=classes, columns=classes).to_csv(
+            output_dir / "confusion_matrix.csv", index_label="expected_class",
+        )
+        print("Accuracy:", f"{metrics['accuracy']:.2%}")
+        print(f"Correct: {metrics['correct']}/{len(labeled)}")
+    else:
+        print("No class labels found. Predictions saved without accuracy metrics.")
     with (output_dir / "metrics.json").open("w", encoding="utf-8") as file:
         json.dump(metrics, file, indent=2)
-
-    print("Neysan predicted as Vanet:", f"{metrics['neysan_as_vanet_accuracy']:.2%}")
-    print(f"Correct: {metrics['correct']}/{metrics['evaluation_images']}")
-    print("Confidence below 80%:", metrics["below_threshold_images"])
     print("Evaluation results saved:", output_dir.resolve())
 
     return metrics
@@ -354,22 +336,21 @@ def copy_images_for_human_check(results, output_dir):
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Test the Neysan-holdout ResNet18 model. "
-            "The input folder must contain only Neysan images; "
-            "their expected class is vanet."
+            "Classify all checkpoint classes. Class-named folders provide labels; "
+            "mixed unlabeled images receive predictions only."
         )
     )
     parser.add_argument(
         "--checkpoint",
         type=Path,
         required=True,
-        help="Path to resnet18_neysan_trainval_final.pt.",
+        help="Path to a ResNet18 checkpoint with config and class_to_idx.",
     )
     parser.add_argument(
         "--data-dir",
         type=Path,
         required=True,
-        help="Folder containing only Neysan images, including subfolders.",
+        help="Image folder, optionally containing class-named subfolders.",
     )
     parser.add_argument(
         "--output-dir",
@@ -403,7 +384,7 @@ def main():
         args.checkpoint, device
     )
 
-    test_df = read_neysan_images(data_dir)
+    test_df = read_test_images(data_dir, class_to_idx)
     evaluation_df, overlap_summary = exclude_training_overlap(
         test_df, checkpoint, output_dir
     )
@@ -415,6 +396,7 @@ def main():
         classes=classes,
         device=device,
         batch_size=args.batch_size,
+        loss=checkpoint["config"]["loss"],
     )
 
     save_evaluation(
@@ -428,7 +410,7 @@ def main():
 
     copy_images_for_human_check(results, output_dir)
 
-    print("Confidence percentages are uncalibrated sigmoid scores.")
+    print("Confidence scores are uncalibrated.")
     print("Evaluation completed.")
 
 
