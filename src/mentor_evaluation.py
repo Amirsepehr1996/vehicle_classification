@@ -1,3 +1,10 @@
+"""Phase 1: CPU evaluation of the exported ResNet18 BCE vehicle classifier.
+
+Images must be inside class folders directly beneath --data-dir.
+NEYSAN/NYSAN/NISSAN are mapped to VANET. No training is performed.
+Training overlap is checked only when the checkpoint includes training_sha256.
+"""
+
 from pathlib import Path
 import argparse
 import hashlib
@@ -185,52 +192,46 @@ def read_test_images(data_dir, class_to_idx):
 
 # check training overlap
 def check_training_overlap(test_df, checkpoint, output_dir):
+    """Exclude known training copies; report unknown overlap honestly."""
     training_hashes = checkpoint.get("training_sha256")
-
-    if not training_hashes:
-        raise ValueError(
-            "Training hashes are missing from the checkpoint. "
-            "Use the exported mentor checkpoint."
-        )
-
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    checked = training_hashes is not None and len(training_hashes) > 0
 
-    overlap_mask = test_df["sha256"].isin(set(training_hashes))
+    if checked:
+        if not isinstance(training_hashes, (list, tuple, set, dict)):
+            raise ValueError("training_sha256 must be a collection of image hashes.")
+        overlap_mask = test_df["sha256"].isin(set(training_hashes))
+        excluded_df = test_df.loc[overlap_mask].copy()
+        evaluation_df = test_df.loc[~overlap_mask].copy()
+    else:
+        print("WARNING: Training hashes are missing; training/test overlap is NOT checked.")
+        excluded_df = test_df.iloc[:0].copy()
+        evaluation_df = test_df.copy()
 
-    excluded_df = test_df.loc[overlap_mask].copy()
-    evaluation_df = test_df.loc[~overlap_mask].copy()
     evaluation_df = evaluation_df.reset_index(drop=True)
-
-    excluded_df.to_csv(
-        output_dir / "excluded_training_overlap.csv",
-        index=False,
-    )
-
+    excluded_df.to_csv(output_dir / "excluded_training_overlap.csv", index=False)
     summary = {
         "supplied_images": int(len(test_df)),
-        "excluded_training_overlaps": int(len(excluded_df)),
+        "training_overlap_checked": checked,
+        "excluded_training_overlaps": int(len(excluded_df)) if checked else None,
         "evaluation_images": int(len(evaluation_df)),
-        "overlap_check_method": "exact_file_sha256",
+        "overlap_check_method": (
+            "exact_file_sha256" if checked else "not_checked_missing_training_hashes"
+        ),
         "extra_duplicate_copies_in_evaluation": int(
             len(evaluation_df) - evaluation_df["sha256"].nunique()
         ),
     }
-
-    with (output_dir / "overlap_summary.json").open(
-        "w", encoding="utf-8"
-    ) as file:
+    with (output_dir / "overlap_summary.json").open("w", encoding="utf-8") as file:
         json.dump(summary, file, indent=2)
-
-    print("Images supplied:", summary["supplied_images"])
-    print("Training overlaps excluded:", summary["excluded_training_overlaps"])
-    print("Images remaining for evaluation:", summary["evaluation_images"])
-
+    print("Images supplied:", len(test_df))
+    print("Training overlaps excluded:", len(excluded_df) if checked else "unknown")
+    print("Images remaining for evaluation:", len(evaluation_df))
+    if summary["extra_duplicate_copies_in_evaluation"]:
+        print("Duplicate test copies retained:", summary["extra_duplicate_copies_in_evaluation"])
     if evaluation_df.empty:
-        raise ValueError(
-            "No images remain after excluding training overlaps."
-        )
-
+        raise ValueError("No images remain after excluding training overlaps.")
     return evaluation_df, summary
 
 
@@ -283,7 +284,7 @@ def evaluate_model(model, loader, evaluation_df, classes, device):
     model.eval()
 
     with torch.inference_mode():
-        for images, labels in loader:
+        for batch_index, (images, labels) in enumerate(loader, start=1):
             images = images.to(device)
             logits = model(images)
 
@@ -301,6 +302,7 @@ def evaluate_model(model, loader, evaluation_df, classes, device):
             true_labels.extend(labels.tolist())
             predicted_labels.extend(predicted.cpu().tolist())
             confidence_scores.extend(confidence.cpu().tolist())
+            print(f"Evaluated batch {batch_index}/{len(loader)}", flush=True)
 
     if len(predicted_labels) != len(evaluation_df):
         raise ValueError("Prediction count does not match image count.")
@@ -373,7 +375,7 @@ def evaluate_model(model, loader, evaluation_df, classes, device):
 
     if missing_classes:
         print("Classes absent from evaluation:", missing_classes)
-        print("Macro metrics include all eight model classes.")
+        print("Macro metrics include all model classes.")
 
     return predictions_df, metrics, report, matrix
 
